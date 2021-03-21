@@ -71,7 +71,7 @@ namespace SAHC
             {
                 //Прослушиваем по адресу
                 var localIp = new IPEndPoint(_localHost, _localPort);
-                _listeningSocket.Bind(localIp);
+                _listeningSocket!.Bind(localIp);
 
                 while (true)
                 {

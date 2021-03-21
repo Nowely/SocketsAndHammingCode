@@ -8,31 +8,44 @@ namespace SAHC
 {
     public class HammingCode
     {
-        private int _wordLenght;
+        /// <summary> Lenght of information word </summary>
+        private int WordLenght { get; set; }
+
+        /// <summary> Possible count of control bits. True value is some or some + 1. Need for calculate true value </summary>
+        private int PossibleControlBitsCount => (int) Math.Round(Math.Log2(WordLenght + 1));
+
+        /// <summary> Count of control bits for insert </summary>
+        private int ControlBitsCount => WordLenght + PossibleControlBitsCount < Pow2(PossibleControlBitsCount)
+            ? PossibleControlBitsCount
+            : PossibleControlBitsCount + 1;
+
+        /// <summary> Size of sending package. Must be mod8 == 0 because package send in array of byte </summary>
+        private int PackageSize => WordLenght + ControlBitsCount + (8 - (WordLenght + ControlBitsCount) % 8);
+
+        private int InsignificantBitsNumber => PackageSize - (WordLenght + ControlBitsCount);
 
         public HammingCode(int wordLenght)
         {
-            _wordLenght = wordLenght;
+            if (wordLenght <= 0) throw new ArgumentException("Word lenght can't be less 1!", nameof(wordLenght));
+
+            WordLenght = wordLenght;
         }
 
 
         /// <summary> Разбиение массива битов на длину слова </summary>
-        /// <param name="bits"> Массив битов </param>
+        /// <param name="bytes"> Массив байтов </param>
         /// <returns> Массив слов </returns>
-        private bool[][] DivideOnWordLenght(BitArray bits)
+        private List<bool>[] DivideOnWordLenghtBits(byte[] bytes)
         {
-            var differenceToFull = _wordLenght - bits.Length % _wordLenght;
-            var holisticArray = new bool[differenceToFull + bits.Length];
-            bits.CopyTo(holisticArray, differenceToFull);
+            var bits = new BitArray(bytes);
+            Log.Write(LogType.BitsCountForEncode, bits.Count);
 
-            //TODO не подгонять длину слова под стандарт, пусть один последний будет меньше
-            var countOfWords = holisticArray.Length / _wordLenght;
-            var result = new bool[countOfWords][];
+            var result = bits.Split(WordLenght);
 
-            for (var i = 0; i < countOfWords; i++)
+            // TODO add description 
+            while (result[^1].Count < WordLenght)
             {
-                result[i] = new bool[_wordLenght];
-                Array.Copy(holisticArray, i * _wordLenght, result[i], 0, _wordLenght);
+                result[^1].Add(false);
             }
 
             return result;
@@ -59,13 +72,13 @@ namespace SAHC
             var controlBitsCount = (int) Math.Floor(Math.Log2(word.Count + 1));
             var bitArrayWord = new BitArray(word.ToArray());
 
-            
+
             var bitArrays = new BitArray[controlBitsCount];
 
             // Initialize arrays
             for (var i = 0; i < bitArrays.Length; i++)
                 bitArrays[i] = new BitArray(word.Count);
-                
+
             // Fill control bits array
             for (var i = 0; i < bitArrays.Length; i++)
             for (var j = Pow2(i) - 1; j < word.Count; j += Pow2(i + 1))
@@ -73,7 +86,7 @@ namespace SAHC
                 var controlLenght = 0;
                 while (controlLenght < Pow2(i))
                 {
-                    bitArrays[i][j] = true; 
+                    bitArrays[i][j] = true;
                     controlLenght++;
                 }
             }
@@ -84,111 +97,126 @@ namespace SAHC
                 word[(int) Math.Pow(2, i) - 1] = CalculateControlBit(i);
             }
 
-            bool CalculateControlBit(int index) => bitArrayWord.And(bitArrays[index]).Cast<bool>().Count(o => o) % 2 == 1;
+            bool CalculateControlBit(int index) =>
+                bitArrayWord.And(bitArrays[index]).Cast<bool>().Count(o => o) % 2 == 1;
         }
 
         private static int Pow2(int i) => (int) Math.Pow(2, i);
-        
-        private bool[] Encode(bool[] word)
+
+        private void Encode(List<bool> word)
         {
-            var result = word.ToList();
-
-            InsertControlBits(result);
-            CalculateControlBits(result);
-
-            return result.ToArray();
+            InsertControlBits(word);
+            CalculateControlBits(word);
+            AddInsignificantBits();
+            
+            
+            
+            void AddInsignificantBits()
+            {
+                for (var i = 0; i < InsignificantBitsNumber; i++)
+                    word.Add(false);
+            }
         }
+
 
         //TODO кодирование слов распареллелить
         public byte[] Encode(string message, int maxErrorsPerWord = 0)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(message);
-            var bits = new BitArray(bytes);
-            var words = DivideOnWordLenght(bits);
-            var wordsWithControlBits = words.Select(Encode);
-            var unionBits = Union(wordsWithControlBits);
-            
+            Log.Write(LogType.Start, message);
+
+            var bytes = Encoding.UTF8.GetBytes(message);
+            var words = DivideOnWordLenghtBits(bytes);
+            Array.ForEach(words, Encode);
+            var unionBits = Concat(words);
             return ToByteArray(unionBits);
         }
 
         public string Decode(byte[] bytes)
         {
-            var bits = new BitArray(bytes);
-            var words = DivideOnWordLenght(bits);
-            var correctedWords = words.Select(Correct);
-            
-            var wordsWithoutControlBits = correctedWords.Select(RemoveControlBits);
-            var unionBits = Union(wordsWithoutControlBits);
-            var bitsToDecode = RemoveEmptyValue(unionBits);
-            //remove лишнее
-            return Encoding.UTF8.GetString(ToByteArray(bitsToDecode));
+            var words = DivideOnPackageBits(bytes);
+            Array.ForEach(words, Decode);
+            var unionBits = Concat(words);
+            RemoveEmptyValue(unionBits);
+            var message = Encoding.UTF8.GetString(ToByteArray(unionBits));
+
+            Log.Write(LogType.Finish, message);
+            return message;
         }
 
-        private bool[] RemoveEmptyValue(bool[] bits)
+        private void Decode(List<bool> word)
         {
-            var result = bits.ToList();
-            var isDeleteFirstByte = true;
+            RemoveInsignificantBits();
+            Correct(word);
+            RemoveControlBits(word);
             
-            searchAgain:
-            for (var i = 0; i < 8; i++)
+            void RemoveInsignificantBits()
             {
-                isDeleteFirstByte &= !bits[i];
-                if (!isDeleteFirstByte) break;
+                word.RemoveRange(word.Count - InsignificantBitsNumber, InsignificantBitsNumber);
             }
-            
+        }
+        
+        private List<bool>[] DivideOnPackageBits(byte[] bytes)
+        {
+            var bits = new BitArray(bytes);
+            return bits.Split(PackageSize);
+        }
 
-            if (isDeleteFirstByte)
+        private void RemoveEmptyValue(List<bool> bits)
+        {
+            var isDeleteEndByte = true;
+
+            searchAgain:
+            for (var i = 1; i <= 8; i++)
             {
-                for (var i = 0; i < 8; i++)
-                    result.RemoveRange(0,8);
+                isDeleteEndByte &= !bits[^i];
+                if (!isDeleteEndByte) break;
+            }
+
+
+            if (isDeleteEndByte)
+            {
+                bits.RemoveRange(bits.Count - 8, 8);
                 goto searchAgain;
             }
 
-            while (result.Count % 8 != 0)
+            while (bits.Count % 8 != 0)
             {
-                result.RemoveAt(0);
+                bits.RemoveAt(bits.Count -1);
             }
-
-            return result.ToArray();
         }
 
-        private static bool[] RemoveControlBits(bool[] word)
+        private void RemoveControlBits(List<bool> word)
         {
-            var result = word.ToList();
-            var controlBitsCount = (int) Math.Floor(Math.Log2(word.Length + 1));
-            for (var i = controlBitsCount - 1; i >= 0; i--)
+            for (var i = ControlBitsCount - 1; i >= 0; i--)
             {
-                result.RemoveAt(Pow2(i) - 1);
+                word.RemoveAt(Pow2(i) - 1);
             }
 
-            return result.ToArray();
         }
 
-        private bool[] Correct(bool[] word)
+        private void Correct(List<bool> word)
         {
-            var result = word.ToList();
-            
-            var controlBits = GetControlBits(result);
-            CalculateControlBits(result);
-            var controlDecodeBits = GetControlBits(result);
+
+            var controlBits = GetControlBits(word);
+            CalculateControlBits(word);
+            var controlDecodeBits = GetControlBits(word);
             var errorBitPosition = GetErrorBitPosition(controlBits, controlDecodeBits);
-            result[errorBitPosition] = !result[errorBitPosition];
+            word[errorBitPosition] = !word[errorBitPosition];
+            
 
-            return result.ToArray();
-            
-            
             bool[] GetControlBits(List<bool> bits)
             {
-                var controlBitsCount = (int) Math.Floor(Math.Log2(word.Length + 1));
+                var controlBitsCount = (int) Math.Floor(Math.Log2(word.Count + 1));
                 var bools = new bool[controlBitsCount];
                 for (var i = 0; i < controlBitsCount; i++)
                 {
                     bools[i] = word[Pow2(i) - 1];
                     word[Pow2(i) - 1] = false;
                 }
+
                 return bools;
             }
-            
+
             static int GetErrorBitPosition(bool[] controlBits, bool[] controlDecodeBits)
             {
                 var position = 0;
@@ -207,20 +235,29 @@ namespace SAHC
         {
             var result = Array.Empty<bool>();
 
-            foreach (var bit in wordsWithControlBits) 
+            foreach (var bit in wordsWithControlBits)
                 result = result.Concat(bit).ToArray();
             return result;
         }
 
-        public static byte[] ToByteArray(bool[] bits)
+        public static byte[] ToByteArray(List<bool> bits)
         {
-            return ToByteArray(new BitArray(bits));
+            return ToByteArray(new BitArray(bits.ToArray()));
         }
+
         public static byte[] ToByteArray(BitArray bits)
         {
             byte[] ret = new byte[(bits.Length - 1) / 8 + 1];
             bits.CopyTo(ret, 0);
             return ret;
+        }
+        
+        /// <summary>
+        /// Concatenates two or more arrays into a single one.
+        /// </summary>
+        public static List<bool> Concat(List<bool>[] arrays)
+        {
+            return (from array in arrays from arr in array select arr).ToList();
         }
     }
 }
