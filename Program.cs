@@ -5,3 +5,4 @@ using SAHC;
 //udp.Start();
 var a = new HammingCode(54);
 a.Decode(a.Encode("Hello world!"));
+
